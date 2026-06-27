@@ -1,0 +1,184 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+#include <DHT.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// WiFi
+const char* ssid = "WIFI NAME";
+const char* password = "WIFI PASSWORD";
+
+String sensorServer = "http://IP ADDRESS/data";
+String accessServer = "http://IP ADDRESS/access";
+
+// RFID
+#define SS_PIN 5
+#define RST_PIN 22
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// Replace with your RFID UID
+String authorizedUID = "271e5964";
+
+// DHT11
+#define DHTPIN 4
+#define DHTTYPE DHT11
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// MQ135
+#define MQ_PIN 34
+
+// Servo
+#define SERVO_PIN 13
+Servo doorServo;
+
+// Buzzer
+#define BUZZER_PIN 27
+
+void setup()
+{
+  Serial.begin(115200);
+
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  dht.begin();
+
+  doorServo.attach(SERVO_PIN);
+  doorServo.write(0);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi Connected");
+  Serial.println(WiFi.localIP());
+}
+
+void loop()
+{
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  int gasValue = analogRead(MQ_PIN);
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+
+  Serial.print(" Humidity: ");
+  Serial.print(humidity);
+
+  Serial.print(" Gas: ");
+  Serial.println(gasValue);
+
+  // Send sensor values
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    HTTPClient http;
+
+    http.begin(sensorServer);
+
+    http.addHeader("Content-Type", "application/json");
+
+    String jsonData = "{";
+    jsonData += "\"temperature\":" + String(temperature) + ",";
+    jsonData += "\"humidity\":" + String(humidity) + ",";
+    jsonData += "\"gas\":" + String(gasValue);
+    jsonData += "}";
+
+    int responseCode = http.POST(jsonData);
+
+    Serial.print("Sensor Upload: ");
+    Serial.println(responseCode);
+
+    http.end();
+  }
+
+  // RFID
+  if (mfrc522.PICC_IsNewCardPresent() &&
+      mfrc522.PICC_ReadCardSerial())
+  {
+    String uid = "";
+
+    for (byte i = 0; i < mfrc522.uid.size; i++)
+    {
+      uid += String(mfrc522.uid.uidByte[i], HEX);
+    }
+
+    uid.toLowerCase();
+
+    String status;
+    String door;
+
+    if (uid == authorizedUID)
+    {
+      status = "Granted";
+      door = "Open";
+
+      Serial.println("ACCESS GRANTED");
+
+      for (int pos = 0; pos <= 180; pos++)
+      {
+        doorServo.write(pos);
+        delay(15);
+      }
+
+      delay(5000);
+
+      for (int pos = 180; pos >= 0; pos--)
+      {
+        doorServo.write(pos);
+        delay(15);
+      }
+
+      door = "Closed";
+    }
+    else
+    {
+      status = "Denied";
+      door = "Locked";
+
+      digitalWrite(BUZZER_PIN, HIGH);
+      delay(1000);
+      digitalWrite(BUZZER_PIN, LOW);
+    }
+
+    // Send access log
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      HTTPClient http;
+
+      http.begin(accessServer);
+
+      http.addHeader("Content-Type", "application/json");
+
+      String jsonData = "{";
+      jsonData += "\"uid\":\"" + uid + "\",";
+      jsonData += "\"status\":\"" + status + "\",";
+      jsonData += "\"door\":\"" + door + "\"";
+      jsonData += "}";
+
+      int responseCode = http.POST(jsonData);
+
+      Serial.print("Access Upload: ");
+      Serial.println(responseCode);
+
+      http.end();
+    }
+
+    mfrc522.PICC_HaltA();
+  }
+
+  delay(5000);
+}
